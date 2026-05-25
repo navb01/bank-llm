@@ -31,14 +31,58 @@ CHUNK_OVERLAP = 200         # Overlap between chunks (prevents splitting key inf
 TOP_K_RESULTS = 8           # Number of chunks to retrieve per query
 MIN_SIMILARITY_SCORE = 0.10 # Low threshold — let more chunks through for LLM to evaluate
 
-# ─── Server Settings ──────────────────────────────────────────────────────────
-SERVER_HOST = "0.0.0.0"     # Bind to all interfaces (LAN access)
-SERVER_PORT = 8000
-CORS_ORIGINS = ["*"]        # Allow all origins on LAN
+# ─── Security & Rate Limiting ────────────────────────────────────────────────
+ENABLE_RATE_LIMITING = True
+RATE_LIMIT_REQUESTS = 100        # Requests per window
+RATE_LIMIT_WINDOW_SECONDS = 60   # Time window in seconds
+
+# IP Whitelist for admin panel (empty = allow all on LAN)
+ADMIN_IP_WHITELIST = []  # Example: ["192.168.1.*", "127.0.0.1"]
+
+# ─── Logging & Monitoring ────────────────────────────────────────────────────
+LOG_LEVEL = "INFO"
+LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+ENABLE_QUERY_LOGGING = True  # Log all queries to file
+QUERY_LOG_FILE = LOGS_DIR / "queries.log"
+SCRAPE_LOG_FILE = LOGS_DIR / "scraping.log"
+
+# ─── Performance Optimization ────────────────────────────────────────────────
+ENABLE_QUERY_CACHING = True
+CACHE_TTL_SECONDS = 300  # Cache query results for 5 minutes
+MAX_WORKERS = 4  # Thread pool size for parallel tasks
 
 # ─── Web Scraping (Secondary Learning) ────────────────────────────────────────
-# Web scraping disabled - using uploaded documents only
-SCRAPE_SOURCES = []
+# Configure RBI, NABARD, SEBI sources for web scraping
+SCRAPE_SOURCES = [
+    {
+        "name": "RBI - Notifications & Circulars",
+        "url": "https://www.rbi.org.in/scripts/NotificationUser.aspx",
+        "category": "RBI",
+    },
+    {
+        "name": "RBI - Master Circulars",
+        "url": "https://www.rbi.org.in/scripts/BS_ViewMasterCircular.aspx",
+        "category": "RBI",
+    },
+    {
+        "name": "NABARD - Circulars & Guidelines",
+        "url": "https://www.nabard.org/scripts/Circularscript.php",
+        "category": "NABARD",
+    },
+    {
+        "name": "SEBI - Circulars",
+        "url": "https://www.sebi.gov.in/sebiweb/other/OtherPage.html?page_id=714",
+        "category": "SEBI",
+    },
+    {
+        "name": "SEBI - Notifications",
+        "url": "https://www.sebi.gov.in/sebiweb/other/OtherPage.html?page_id=715",
+        "category": "SEBI",
+    },
+]
+
+# Web scraping schedule (run every N hours) - 0 to disable
+SCRAPE_SCHEDULE_HOURS = 24
 
 # ─── System Prompt (Anti-Hallucination) ───────────────────────────────────────
 SYSTEM_PROMPT = """You are BankAssist, an AI assistant for bank staff. You are trained on internal bank circulars and regulatory documents from RBI, NABARD, and SEBI.
@@ -60,3 +104,8 @@ Context Documents:
 {context}
 
 Remember: If the answer is not in the context above, say so clearly. Do not fabricate information."""
+
+# ─── Server Configuration ────────────────────────────────────────────────────
+SERVER_HOST = "0.0.0.0"  # Listen on all interfaces (accessible over LAN)
+SERVER_PORT = 8000
+CORS_ORIGINS = ["*"]  # Allow all origins on LAN

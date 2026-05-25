@@ -33,3 +33,11 @@ lxml>=5.1.0
 # Utilities
 pydantic>=2.5.0
 python-dotenv>=1.0.0
+
+# Production monitoring & performance
+python-json-logger>=2.0.0
+psutil>=5.9.0
+
+# Optional: For async workers in production
+gunicorn>=21.0.0
+

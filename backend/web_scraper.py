@@ -12,8 +12,7 @@ from datetime import datetime
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from document_processor import ingest_text
-from config import SCRAPE_SOURCES, CHROMA_COLLECTION_EXTERNAL
+from config import SCRAPE_SOURCES, CHROMA_COLLECTION_EXTERNAL, SCRAPE_LOG_FILE
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +99,8 @@ def run_web_scraping(test_mode: bool = False) -> Dict[str, Any]:
     Returns:
         dict with success/failure status and statistics
     """
+    from document_processor import ingest_text  # Import here to avoid circular imports
+    
     stats = {
         "total_sources": 0,
         "successful_sources": 0,
@@ -161,13 +162,14 @@ def run_web_scraping(test_mode: bool = False) -> Dict[str, Any]:
                         "source": source_name,
                         "source_url": source_url,
                         "fetch_date": datetime.now().isoformat(),
-                        "type": "web_scrape"
+                        "type": "web_scrape",
+                        "category": source.get("category", "Regulatory"),
+                        "filename": f"{source_name.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.txt",
                     }
                     
                     # Ingest the content
                     result = ingest_text(
                         text=content,
-                        doc_name=doc_title,
                         metadata=metadata,
                         collection_name=CHROMA_COLLECTION_EXTERNAL
                     )

@@ -169,6 +169,16 @@ function escapeHtml(str) {
     .replace(/"/g, '&quot;');
 }
 
+function escapeHtmlAttr(str) {
+  // Escape for use in HTML attributes
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function formatAnswer(text) {
   // Convert markdown-like patterns
   return escapeHtml(text)
@@ -220,6 +230,10 @@ function createTypingBubble() {
 function createBotBubble(answerText, sources, timestamp) {
   const div = document.createElement('div');
   div.className = 'message bot-message';
+  
+  // Generate unique ID for this message
+  const msgId = 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+  div.dataset.msgId = msgId;
 
   const sourcesHtml = buildSourcesHtml(sources);
   const noInfoKeywords = ["don't have information", "doesn't contain", "not found", "no relevant"];
@@ -228,12 +242,23 @@ function createBotBubble(answerText, sources, timestamp) {
     ? `<div class="no-source-notice">⚠️ No matching circulars found in the knowledge base for this query.</div>`
     : '';
 
+  // Feedback rating buttons
+  const feedbackHtml = `
+    <div class="message-feedback" id="feedback_${msgId}">
+      <span class="feedback-label">Helpful?</span>
+      <button class="feedback-btn" onclick="submitFeedback('${msgId}', 1, '${escapeHtmlAttr(answerText)}', ${JSON.stringify(sources).replace(/'/g, '&quot;')})" title="Not helpful">👎</button>
+      <button class="feedback-btn" onclick="submitFeedback('${msgId}', 3, '${escapeHtmlAttr(answerText)}', ${JSON.stringify(sources).replace(/'/g, '&quot;')})" title="Neutral">😐</button>
+      <button class="feedback-btn" onclick="submitFeedback('${msgId}', 5, '${escapeHtmlAttr(answerText)}', ${JSON.stringify(sources).replace(/'/g, '&quot;')})" title="Very helpful">👍</button>
+    </div>
+  `;
+
   div.innerHTML = `
     <div class="avatar bot-avatar">🏦</div>
     <div class="message-body">
       <div class="message-bubble">${formatAnswer(answerText)}</div>
       ${noSourceNotice}
       ${sourcesHtml}
+      ${feedbackHtml}
       <div class="message-meta">🤖 BankAssist AI &nbsp;·&nbsp; ${formatTime(timestamp)}</div>
     </div>
   `;
@@ -424,3 +449,147 @@ document.addEventListener('click', (e) => {
 
 // Wire send button
 document.getElementById('sendBtn')?.addEventListener('click', sendMessage);
+
+
+// ─── Self-Learning Feedback System (NEW!) ─────────────────────────────────
+
+let currentFeedbackContext = { query: "", answer: "", sources: [] };
+let selectedRating = 0;
+
+function showFeedbackModal(query, answer, sources) {
+  currentFeedbackContext = { query, answer, sources };
+  selectedRating = 0;
+  
+  // Reset UI
+  document.getElementById('feedbackComment').value = '';
+  document.querySelectorAll('.feedback-btn').forEach(btn => btn.classList.remove('active'));
+  
+  document.getElementById('feedbackModal').style.display = 'flex';
+}
+
+function closeFeedbackModal() {
+  document.getElementById('feedbackModal').style.display = 'none';
+  currentFeedbackContext = { query: "", answer: "", sources: [] };
+  selectedRating = 0;
+}
+
+function setFeedbackRating(rating) {
+  selectedRating = rating;
+  document.querySelectorAll('.feedback-btn').forEach((btn, i) => {
+    btn.classList.toggle('active', i + 1 === rating);
+  });
+}
+
+async function submitFeedback() {
+  if (!selectedRating) {
+    alert('Please select a rating');
+    return;
+  }
+  
+  const comment = document.getElementById('feedbackComment').value.trim();
+  
+  try {
+    const response = await fetch(`${API_BASE}/api/feedback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query: currentFeedbackContext.query,
+        answer: currentFeedbackContext.answer,
+        rating: selectedRating,
+        sources: currentFeedbackContext.sources,
+        comment: comment,
+        session_id: currentSessionId,
+      }),
+    });
+    
+    if (response.ok) {
+      const data = await response.json();
+      
+      // Show success toast
+      const el = document.getElementById('toast');
+      el.textContent = `✓ Feedback recorded (${selectedRating}/5). Thank you!`;
+      el.className = 'show success';
+      setTimeout(() => { el.className = ''; }, 3000);
+      
+      closeFeedbackModal();
+      
+      // Auto-reload learning insights if admin
+      console.log('Feedback submitted successfully');
+    } else {
+      alert('Failed to submit feedback');
+    }
+  } catch (e) {
+    alert('Error submitting feedback: ' + e.message);
+  }
+}
+
+// Add feedback button to bot messages
+function addFeedbackButton(botBubble, query, answer, sources) {
+  const feedbackDiv = document.createElement('div');
+  feedbackDiv.style.cssText = `
+    margin-top: 12px;
+    display: flex;
+    gap: 8px;
+    font-size: 12px;
+    border-top: 1px solid var(--border-subtle);
+    padding-top: 10px;
+  `;
+  
+  feedbackDiv.innerHTML = `
+    <span style="color: var(--text-muted);">Helpful?</span>
+    <button onclick="showFeedbackModal('${escapeHtml(query).replace(/'/g, "\\'")}', '${escapeHtml(answer).slice(0,100).replace(/'/g, "\\'")}', ${JSON.stringify(sources).replace(/"/g, '&quot;')})" 
+            style="color: var(--accent-green); background: none; border: none; cursor: pointer; font-size: 12px; padding: 0;">👍</button>
+    <button onclick="showFeedbackModal('${escapeHtml(query).replace(/'/g, "\\'")}', '${escapeHtml(answer).slice(0,100).replace(/'/g, "\\'")}', ${JSON.stringify(sources).replace(/"/g, '&quot;')})" 
+            style="color: var(--accent-red); background: none; border: none; cursor: pointer; font-size: 12px; padding: 0;">👎</button>
+  `;
+  
+  botBubble.appendChild(feedbackDiv);
+}
+
+// Submit feedback directly from inline message buttons
+async function submitFeedback(msgId, rating, answerText, sources) {
+  try {
+    // Get the query from sessionHistory
+    const userMsg = sessionHistory[sessionHistory.length - 2]; // Previous user message
+    const query = userMsg ? userMsg.content : "unknown query";
+    
+    const response = await fetch(`${API_BASE}/api/feedback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query: query,
+        answer: answerText,
+        rating: rating,
+        sources: sources,
+        comment: "",
+        session_id: currentSessionId,
+        user_id: `user_${currentSessionId.substring(0, 8)}`,
+        response_time_ms: 0,
+      }),
+    });
+    
+    if (response.ok) {
+      // Show feedback animation
+      const feedbackEl = document.getElementById(`feedback_${msgId}`);
+      if (feedbackEl) {
+        feedbackEl.innerHTML = `<span style="color: var(--accent-green); font-size: 12px; font-weight: 600;">✓ Thank you for your feedback!</span>`;
+        setTimeout(() => {
+          feedbackEl.style.display = 'none';
+        }, 3000);
+      }
+      
+      // Show toast
+      const el = document.getElementById('toast');
+      if (el) {
+        el.textContent = `✓ Feedback recorded (${rating}/5). System is learning!`;
+        el.className = 'show success';
+        setTimeout(() => { el.className = ''; }, 3000);
+      }
+    } else {
+      console.error('Feedback submission failed');
+    }
+  } catch (e) {
+    console.error('Error submitting feedback:', e);
+  }
+}
+

@@ -277,6 +277,7 @@
         <div class="status-dot" id="statusDot"></div>
         <span id="statusText">Connecting…</span>
       </div>
+      <a href="/static/learning.html" class="btn btn-outline">🧠 Learning</a>
       <a href="/" class="btn btn-outline">💬 Chat</a>
     </div>
   </header>
@@ -326,6 +327,38 @@
         <button class="btn btn-primary" onclick="triggerUpload()">📤 Upload Selected Files</button>
         <button class="btn btn-outline" onclick="ingestFolder()">📁 Re-ingest All from Folder</button>
         <button class="btn btn-danger" onclick="forceReingest()" title="Clears entire vector DB and re-ingests all documents fresh">🔄 Force Re-ingest All (Clean)</button>
+      </div>
+    </div>
+
+    <!-- Web Scraping Card -->
+    <div class="admin-card">
+      <div class="card-header">
+        <div class="card-icon blue">🌐</div>
+        <div>
+          <div class="card-title">Secondary Learning (Web)</div>
+          <div class="card-subtitle">Fetch RBI, NABARD, SEBI public circulars</div>
+        </div>
+      </div>
+
+      <div style="margin-bottom:16px;padding:14px;background:var(--bg-input);border-radius:var(--radius-sm);border-left:3px solid var(--accent-blue);">
+        <div style="font-size:12px;color:var(--text-secondary);">
+          📍 <strong>Sources configured:</strong>
+          <ul style="margin:6px 0 0 20px;padding:0;">
+            <li>🏦 RBI Notifications & Master Circulars</li>
+            <li>🌱 NABARD Circulars & Guidelines</li>
+            <li>📊 SEBI Circulars & Notifications</li>
+          </ul>
+        </div>
+      </div>
+
+      <div id="scrapingStatus" style="margin-bottom:12px;display:none;">
+        <div style="font-size:12px;color:var(--text-muted);margin-bottom:8px;" id="scrapingLabel">Scraping in progress…</div>
+        <div class="progress-bar-wrap"><div class="progress-bar" id="scrapingProgressBar" style="width:33%;"></div></div>
+      </div>
+
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        <button class="btn btn-primary" id="webScrapBtn" onclick="startWebScraping()">🌐 Start Web Fetch Now</button>
+        <button class="btn btn-outline" onclick="checkScrapingStatus()" id="checkScrapBtn" style="display:none;">📊 Check Status</button>
       </div>
     </div>
 
@@ -641,6 +674,87 @@ function toast(msg, type='success') {
 function escHtml(str) {
   return String(str || '')
     .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ─── Web Scraping ─────────────────────────────────────────
+let scrapingInProgress = false;
+
+async function startWebScraping() {
+  if (scrapingInProgress) {
+    toast('⚠️ Scraping already in progress', 'error');
+    return;
+  }
+
+  scrapingInProgress = true;
+  document.getElementById('webScrapBtn').disabled = true;
+  document.getElementById('scrapingStatus').style.display = 'block';
+  log('🌐 Starting web scraping from RBI, NABARD, SEBI…', 'info');
+
+  try {
+    const r = await fetch(`${API}/api/ingest/web`, { method: 'POST' });
+    const data = await r.json();
+    log(`Web scraping task initiated: ${data.message}`, data.status === 'started' ? 'ok' : 'err');
+    toast(data.message, 'success');
+
+    // Check status every 2 seconds
+    let checked = 0;
+    const checkInterval = setInterval(async () => {
+      checked++;
+      const sres = await fetch(`${API}/api/scraping/status`).catch(() => null);
+      if (!sres) return;
+
+      const status = await sres.json();
+      if (!status.in_progress) {
+        clearInterval(checkInterval);
+        scrapingInProgress = false;
+        document.getElementById('webScrapBtn').disabled = false;
+        document.getElementById('scrapingStatus').style.display = 'none';
+
+        if (status.last_result) {
+          const res = status.last_result;
+          log(`✓ Web scraping completed: ${res.successful_sources || 0} succeeded, ${res.failed_sources || 0} failed`, 'ok');
+          toast(`✓ Web scraping: ${res.successful_sources} sources ✓, ${res.failed_sources} failed`, 'success');
+        }
+        setTimeout(() => { loadDocs(); loadStats(); checkStatus(); }, 2000);
+      } else {
+        const progress = Math.min(95, (checked / 30) * 100);  // 60s max indicator
+        document.getElementById('scrapingProgressBar').style.width = progress + '%';
+      }
+    }, 2000);
+
+    // Safety timeout after 5 minutes
+    setTimeout(() => {
+      if (scrapingInProgress) {
+        clearInterval(checkInterval);
+        scrapingInProgress = false;
+        document.getElementById('webScrapBtn').disabled = false;
+        document.getElementById('scrapingStatus').style.display = 'none';
+        log('⚠️ Web scraping timeout (5min)', 'err');
+      }
+    }, 300000);
+
+  } catch (e) {
+    log(`Error starting web scraping: ${e.message}`, 'err');
+    toast('Failed to start web scraping', 'error');
+    scrapingInProgress = false;
+    document.getElementById('webScrapBtn').disabled = false;
+    document.getElementById('scrapingStatus').style.display = 'none';
+  }
+}
+
+async function checkScrapingStatus() {
+  try {
+    const r = await fetch(`${API}/api/scraping/status`);
+    const data = await r.json();
+    if (data.in_progress) {
+      log('⏳ Web scraping still in progress…', 'info');
+    } else if (data.last_result) {
+      const res = data.last_result;
+      log(`Last scrape: ${res.successful_sources} ✓, ${res.failed_sources} ✗, ${res.total_chars_ingested || 0} chars`, 'ok');
+    }
+  } catch (e) {
+    log(`Error checking scrape status: ${e.message}`, 'err');
+  }
 }
 </script>
 </body>

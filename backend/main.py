@@ -7,13 +7,15 @@ Runs on 0.0.0.0 so it's accessible over LAN/Intranet.
 import shutil
 import logging
 import asyncio
+import time
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
 from datetime import datetime
 from threading import Lock
+from functools import wraps
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks
+from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
@@ -21,7 +23,9 @@ from pydantic import BaseModel
 
 from config import (
     SERVER_HOST, SERVER_PORT, CORS_ORIGINS,
-    CIRCULARS_DIR, BASE_DIR, CHROMA_COLLECTION_INTERNAL
+    CIRCULARS_DIR, BASE_DIR, CHROMA_COLLECTION_INTERNAL, SCRAPE_SOURCES,
+    ENABLE_QUERY_LOGGING, QUERY_LOG_FILE, LOG_LEVEL, LOG_FORMAT,
+    ENABLE_RATE_LIMITING, RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW_SECONDS
 )
 from document_processor import (
     ingest_document, get_ingestion_stats,
@@ -29,13 +33,39 @@ from document_processor import (
 )
 from rag_engine import ask
 from web_scraper import run_web_scraping
+from learning import learning_manager
+from adaptive_learning import adaptive_manager
 
 # Global state for ingestion lock
 ingestion_lock = Lock()
 ingestion_in_progress = False
 
-logging.basicConfig(level=logging.INFO)
+# ─── Logging Setup ────────────────────────────────────────────────────────────
+
+# Create logs directory
+LOGS_DIR = BASE_DIR / "logs"
+LOGS_DIR.mkdir(exist_ok=True, parents=True)
+
+# Configure logging to file and console
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
+    format=LOG_FORMAT,
+    handlers=[
+        logging.FileHandler(LOGS_DIR / "main.log"),
+        logging.StreamHandler(),
+    ]
+)
 logger = logging.getLogger(__name__)
+
+# Query logger to file
+if ENABLE_QUERY_LOGGING:
+    query_logger = logging.getLogger("queries")
+    query_handler = logging.FileHandler(QUERY_LOG_FILE)
+    query_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+    query_logger.addHandler(query_handler)
+    query_logger.setLevel(logging.INFO)
+else:
+    query_logger = None
 
 # ─── App Setup ────────────────────────────────────────────────────────────────
 
@@ -64,6 +94,7 @@ if FRONTEND_DIR.exists():
 class ChatRequest(BaseModel):
     query: str
     session_id: Optional[str] = None
+    user_id: Optional[str] = None  # For personalization
 
 
 class ChatResponse(BaseModel):
@@ -71,10 +102,65 @@ class ChatResponse(BaseModel):
     sources: list
     chunks_found: int
     timestamp: str
+    cached: bool = False  # Whether answer came from cache
+    similar_cached: Optional[Dict] = None  # Similar cached answer if available
 
 
 class DeleteDocRequest(BaseModel):
     filename: str
+
+
+class FeedbackRequest(BaseModel):
+    """User feedback on an answer."""
+    query: str
+    answer: str
+    rating: int  # 1-5
+    sources: list = []
+    comment: str = ""
+    session_id: Optional[str] = None
+    user_id: Optional[str] = None
+    topic: Optional[str] = None  # Query topic for analytics
+    response_time_ms: Optional[float] = None  # For performance tracking
+
+
+# ─── Rate Limiting ────────────────────────────────────────────────────────────
+
+request_counts = {}  # IP -> [(timestamp, count)]
+
+def rate_limit_key(request: Request):
+    """Get rate limit key from request."""
+    return request.client.host if request.client else "unknown"
+
+async def check_rate_limit(request: Request):
+    """Check if request exceeds rate limit."""
+    if not ENABLE_RATE_LIMITING:
+        return True
+    
+    key = rate_limit_key(request)
+    now = datetime.now().timestamp()
+    
+    if key not in request_counts:
+        request_counts[key] = []
+    
+    # Remove old requests outside the window
+    request_counts[key] = [
+        (ts, cnt) for ts, cnt in request_counts[key]
+        if now - ts < RATE_LIMIT_WINDOW_SECONDS
+    ]
+    
+    # Count requests in current window
+    total = sum(cnt for _, cnt in request_counts[key])
+    
+    if total >= RATE_LIMIT_REQUESTS:
+        return False
+    
+    # Add current request
+    if request_counts[key]:
+        request_counts[key][-1] = (request_counts[key][-1][0], request_counts[key][-1][1] + 1)
+    else:
+        request_counts[key].append((now, 1))
+    
+    return True
 
 
 # ─── In-memory query log ──────────────────────────────────────────────────────
@@ -102,12 +188,20 @@ async def admin():
 
 
 @app.post("/api/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest, req: Request):
     """
     Main chat endpoint. Receives a query, runs RAG pipeline,
     returns grounded answer with citations.
+    Integrates adaptive learning for continuous improvement.
     """
     global ingestion_in_progress
+    
+    # Rate limiting
+    if not await check_rate_limit(req):
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded. Maximum 100 requests per 60 seconds."
+        )
     
     # Prevent queries during ingestion
     if ingestion_in_progress:
@@ -120,30 +214,63 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=400, detail="Query too short")
 
     query = request.query.strip()
-    logger.info(f"Chat query: {query}")
+    user_id = request.user_id or "anonymous"
+    user_ip = req.client.host if req.client else "unknown"
+    logger.info(f"Chat query from {user_id} ({user_ip}): {query[:100]}...")
 
+    start_time = time.time()
+    
     try:
-        result = ask(query)
+        # Check for similar cached answers first
+        similar_cached = adaptive_manager.query_clustering.find_similar_cached(query)
+        cached = False
+        
+        if similar_cached:
+            # Use cached answer
+            answer = similar_cached["answer"]
+            sources = similar_cached.get("sources", [])
+            chunks_found = len(sources)
+            cached = True
+            logger.info(f"Serving cached answer with {len(sources)} sources")
+        else:
+            # Run full RAG pipeline
+            result = ask(query)
+            answer = result["answer"]
+            sources = result["sources"]
+            chunks_found = result["chunks_found"]
+        
+        response_time = (time.time() - start_time) * 1000  # ms
 
         response = ChatResponse(
-            answer=result["answer"],
-            sources=result["sources"],
-            chunks_found=result["chunks_found"],
+            answer=answer,
+            sources=sources,
+            chunks_found=chunks_found,
             timestamp=datetime.now().isoformat(),
+            cached=cached,
+            similar_cached=None  # Don't echo cached data in response
         )
 
         # Log query
-        query_log.append({
+        query_data = {
             "query": query,
-            "answer_length": len(result["answer"]),
-            "sources_count": len(result["sources"]),
+            "answer_length": len(answer),
+            "sources_count": len(sources),
             "timestamp": response.timestamp,
-        })
+            "user_id": user_id,
+            "user_ip": user_ip,
+            "response_time_ms": response_time,
+            "cached": cached,
+        }
+        query_log.append(query_data)
+        
+        # Log to file if enabled
+        if query_logger:
+            query_logger.info(f"Q: {query[:100]} | Sources: {len(sources)} | User: {user_id} | Time: {response_time:.0f}ms | Cached: {cached}")
 
         return response
 
     except Exception as e:
-        logger.error(f"Chat error: {e}")
+        logger.error(f"Chat error from {user_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
 
@@ -314,13 +441,266 @@ async def _ingest_all(files: list[Path]):
 @app.post("/api/ingest/web")
 async def ingest_web_sources(background_tasks: BackgroundTasks):
     """
-    Web scraping is disabled. Please upload documents directly to the circulars/ folder
-    or use the /api/ingest/upload endpoint.
+    Trigger web scraping from RBI, NABARD, SEBI regulatory websites.
+    This runs in background and ingests public circulars into the knowledge base.
     """
+    logger.info("Web scraping requested")
+    background_tasks.add_task(_run_scraping_task)
+    
     return {
-        "status": "disabled",
-        "message": "Web scraping is currently disabled. Please upload documents directly using the /api/ingest/upload endpoint or place them in the circulars/ folder and use /api/ingest/folder."
+        "status": "started",
+        "message": "Web scraping started in background. Check /api/scraping/status for progress.",
+        "sources_count": len(list(SCRAPE_SOURCES))
     }
+
+
+# ─── Scraping Status Tracking ────────────────────────────────────────────────
+scraping_in_progress = False
+last_scrape_result = None
+
+
+async def _run_scraping_task():
+    """Run web scraping in background."""
+    global scraping_in_progress, last_scrape_result
+    scraping_in_progress = True
+    try:
+        logger.info("Starting web scraping task...")
+        result = run_web_scraping(test_mode=False)
+        last_scrape_result = result
+        logger.info(f"Web scraping completed: {result['successful_sources']} sources succeeded")
+    except Exception as e:
+        logger.error(f"Web scraping failed: {e}")
+        last_scrape_result = {"status": "error", "error": str(e)}
+    finally:
+        scraping_in_progress = False
+
+
+@app.get("/api/scraping/status")
+async def get_scraping_status():
+    """Get the status of web scraping task."""
+    return {
+        "in_progress": scraping_in_progress,
+        "last_result": last_scrape_result,
+        "timestamp": datetime.now().isoformat()
+    }
+
+
+# ─── Self-Learning & Feedback ────────────────────────────────────────────────
+
+@app.post("/api/feedback")
+async def submit_feedback(request: FeedbackRequest):
+    """
+    Submit user feedback on an answer.
+    Enables the system to learn and improve over time.
+    Integrates both basic learning and adaptive learning.
+    """
+    try:
+        if not 1 <= request.rating <= 5:
+            raise HTTPException(status_code=400, detail="Rating must be 1-5")
+        
+        user_id = request.user_id or "anonymous"
+        
+        # Record in basic learning system
+        learning_manager.process_feedback(
+            query=request.query,
+            answer=request.answer,
+            rating=request.rating,
+            sources=request.sources,
+            comment=request.comment,
+            user_ip="unknown"
+        )
+        
+        # Record in adaptive learning system
+        adaptive_manager.process_interaction(
+            user_id=user_id,
+            query=request.query,
+            answer=request.answer,
+            rating=request.rating,
+            sources=request.sources,
+            response_time=request.response_time_ms or 0,
+            topic=request.topic or "general"
+        )
+        
+        logger.info(f"Feedback submitted: user={user_id}, rating={request.rating}, query={request.query[:50]}...")
+        
+        return {
+            "status": "recorded",
+            "message": "Thank you! Your feedback helps us improve.",
+            "rating": request.rating,
+            "timestamp": datetime.now().isoformat(),
+            "learning_active": True
+        }
+    except Exception as e:
+        logger.error(f"Feedback error: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to record feedback: {str(e)}")
+
+
+@app.get("/api/learning/dashboard")
+async def get_learning_dashboard():
+    """
+    Get learning analytics dashboard.
+    Shows system performance, feedback stats, and improvement suggestions.
+    """
+    try:
+        dashboard = learning_manager.get_dashboard_data()
+        return {
+            "status": "success",
+            "data": dashboard,
+            "timestamp": datetime.now().isoformat(),
+            "learning_enabled": True
+        }
+    except Exception as e:
+        logger.error(f"Dashboard error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/learning/stats")
+async def get_learning_stats():
+    """Get aggregated learning statistics."""
+    try:
+        stats = learning_manager.analytics.compute_stats()
+        return {
+            "status": "success",
+            "stats": stats,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Stats error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/learning/recommendations")
+async def get_recommendations():
+    """Get AI recommendations for system improvement."""
+    try:
+        recommendations = learning_manager.analytics.get_improvement_recommendations()
+        optimizations = learning_manager.adaptive_rag.get_current_insights()
+        
+        return {
+            "status": "success",
+            "recommendations": recommendations,
+            "optimizations": optimizations,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Recommendations error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ─── Advanced Adaptive Learning Endpoints ────────────────────────────────────
+
+@app.get("/api/learning/adaptive/dashboard")
+async def get_adaptive_dashboard():
+    """Get comprehensive adaptive learning dashboard."""
+    try:
+        dashboard = adaptive_manager.get_learning_dashboard()
+        return {
+            "status": "success",
+            "data": dashboard,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Adaptive dashboard error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/learning/adaptive/user-profile/{user_id}")
+async def get_user_profile(user_id: str):
+    """Get personalized user profile and preferences."""
+    try:
+        profile = adaptive_manager.user_profiles.get_user_profile(user_id)
+        params = adaptive_manager.user_profiles.get_personalized_params(user_id)
+        
+        return {
+            "status": "success",
+            "user_id": user_id,
+            "profile": profile,
+            "personalized_params": params,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"User profile error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/learning/adaptive/cache-stats")
+async def get_cache_statistics():
+    """Get query cache performance statistics."""
+    try:
+        stats = adaptive_manager.query_clustering.get_cache_stats()
+        return {
+            "status": "success",
+            "cache_stats": stats,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Cache stats error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/learning/adaptive/suggest-improvements")
+async def suggest_query_improvements(query: str):
+    """
+    Suggest improvements for a query based on learned patterns.
+    Returns rewrite suggestions and similar cached answers.
+    """
+    try:
+        suggestions = adaptive_manager.suggest_improvements(query)
+        return {
+            "status": "success",
+            "query": query,
+            "suggestions": suggestions,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Suggest improvements error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/learning/adaptive/performance/{topic}")
+async def get_topic_performance(topic: str = "general"):
+    """Get performance metrics for a specific query topic."""
+    try:
+        analysis = adaptive_manager.performance_metrics.get_topic_analysis(topic)
+        return {
+            "status": "success",
+            "analysis": analysis,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Topic performance error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/learning/adaptive/optimization-insights")
+async def get_optimization_insights():
+    """Get insights for system optimization based on performance data."""
+    try:
+        insights = adaptive_manager.performance_metrics.get_optimization_insights()
+        return {
+            "status": "success",
+            "insights": insights,
+            "count": len(insights),
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Optimization insights error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/learning/adaptive/all-users-stats")
+async def get_all_users_stats():
+    """Get aggregated statistics across all users."""
+    try:
+        stats = adaptive_manager.user_profiles.get_all_user_stats()
+        return {
+            "status": "success",
+            "stats": stats,
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"All users stats error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.delete("/api/documents/{filename}")
