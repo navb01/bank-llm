@@ -122,6 +122,7 @@ class FeedbackRequest(BaseModel):
     user_id: Optional[str] = None
     topic: Optional[str] = None  # Query topic for analytics
     response_time_ms: Optional[float] = None  # For performance tracking
+    cached: bool = False  # Whether the answer was from cache
 
 
 # ─── Rate Limiting ────────────────────────────────────────────────────────────
@@ -518,8 +519,9 @@ async def submit_feedback(request: FeedbackRequest):
             answer=request.answer,
             rating=request.rating,
             sources=request.sources,
-            response_time=request.response_time_ms or 0,
-            topic=request.topic or "general"
+            response_time_ms=request.response_time_ms or 0,
+            topic=request.topic or "general",
+            cached=request.cached
         )
         
         logger.info(f"Feedback submitted: user={user_id}, rating={request.rating}, query={request.query[:50]}...")

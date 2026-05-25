@@ -123,7 +123,16 @@ class UserProfileManager:
         try:
             profile = db.query(UserProfile).filter_by(id=user_id).first()
             if not profile:
-                profile = UserProfile(id=user_id)
+                profile = UserProfile(
+                    id=user_id,
+                    common_topics={},
+                    total_interactions=0,
+                    avg_rating=0.0,
+                    top_k=5,
+                    similarity_threshold=0.7,
+                    use_cache=True,
+                )
+                db.add(profile)
             
             # Update topics
             if isinstance(profile.common_topics, dict):
@@ -370,6 +379,16 @@ class PerformanceMetrics:
                     id=metric_id,
                     topic=topic,
                     date=date_str,
+                    total_queries=0,
+                    avg_response_time=0.0,
+                    avg_rating=0.0,
+                    cache_hits=0,
+                    cache_misses=0,
+                    ratings_1=0,
+                    ratings_2=0,
+                    ratings_3=0,
+                    ratings_4=0,
+                    ratings_5=0,
                 )
                 db.add(metric)
             
@@ -547,7 +566,7 @@ class AdaptiveLearningManager:
                 self.query_clustering.cache_query(query, answer, rating, sources, topic, user_id, response_time_ms)
             
             # 4. Record metrics
-            self.performance_metrics.record_interaction(topic, rating, response_time_ms, cached)
+            self.performance_metrics.record_interaction(topic, rating, response_time_ms, cache_hit=cached)
             
             # 5. Suggest query rewrite for poor ratings
             if rating <= 2:
