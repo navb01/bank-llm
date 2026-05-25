@@ -41,3 +41,8 @@ psutil>=5.9.0
 # Optional: For async workers in production
 gunicorn>=21.0.0
 
+# Database (PostgreSQL + ORM)
+sqlalchemy>=2.0.0
+psycopg2-binary>=2.9.0  # PostgreSQL adapter
+alembic>=1.12.0  # Database migrations
+

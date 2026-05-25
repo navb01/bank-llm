@@ -109,3 +109,29 @@ Remember: If the answer is not in the context above, say so clearly. Do not fabr
 SERVER_HOST = "0.0.0.0"  # Listen on all interfaces (accessible over LAN)
 SERVER_PORT = 8000
 CORS_ORIGINS = ["*"]  # Allow all origins on LAN
+
+# ─── Database Configuration ──────────────────────────────────────────────────
+# PostgreSQL Connection String
+# Format: postgresql://username:password@host:port/database
+# 
+# Options:
+# 1. LOCAL PostgreSQL (recommended for production):
+#    DATABASE_URL = "postgresql://postgres:password@localhost:5432/bank_llm"
+#
+# 2. REMOTE PostgreSQL (cloud):
+#    DATABASE_URL = "postgresql://user:pass@cloud-host.com:5432/bank_llm"
+#
+# 3. SQLite (development/testing - no setup required):
+#    DATABASE_URL = "sqlite:///" + str(BASE_DIR / "bank_llm.db")
+
+# Default: SQLite for zero-setup testing
+# To use PostgreSQL, install it and set:
+# DATABASE_URL = "postgresql://postgres:your_password@localhost:5432/bank_llm"
+
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    f"sqlite:///{BASE_DIR / 'bank_llm.db'}"  # Local SQLite by default
+)
+
+# Enable database query logging for debugging (set to True to see SQL queries)
+DB_ECHO = os.getenv("DB_ECHO", "False").lower() == "true"

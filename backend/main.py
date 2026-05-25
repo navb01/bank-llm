@@ -35,6 +35,7 @@ from rag_engine import ask
 from web_scraper import run_web_scraping
 from learning import learning_manager
 from adaptive_learning import adaptive_manager
+from database import init_db
 
 # Global state for ingestion lock
 ingestion_lock = Lock()
@@ -773,6 +774,13 @@ async def startup_event():
     logger.info(f"  Circulars Dir: {CIRCULARS_DIR}")
     logger.info(f"  Vector DB: {BASE_DIR / 'vector_db'}")
     logger.info("=" * 60)
+
+    # Initialize database
+    try:
+        init_db()
+        logger.info("  ✓ Database initialized")
+    except Exception as e:
+        logger.error(f"  ✗ Database initialization failed: {e}")
 
     # Log vector DB stats
     stats = get_ingestion_stats()
