@@ -25,11 +25,11 @@ EMBED_MODEL = "nomic-embed-text" # Local embedding model via Ollama
 CHROMA_COLLECTION_INTERNAL = "bank_circulars"    # Internal bank circulars
 CHROMA_COLLECTION_EXTERNAL = "regulatory_docs"   # RBI / NABARD / SEBI docs
 
-# ─── RAG Settings ─────────────────────────────────────────────────────────────
-CHUNK_SIZE = 1000           # Characters per chunk (larger = more context per chunk)
-CHUNK_OVERLAP = 200         # Overlap between chunks (prevents splitting key info)
-TOP_K_RESULTS = 8           # Number of chunks to retrieve per query
-MIN_SIMILARITY_SCORE = 0.10 # Low threshold — let more chunks through for LLM to evaluate
+# ─── RAG Settings (OPTIMIZED FOR SPEED) ──────────────────────────────────────
+CHUNK_SIZE = 800            
+CHUNK_OVERLAP = 150
+TOP_K_RESULTS = 3           # Reduced from 8 to 3
+MIN_SIMILARITY_SCORE = 0.55 # Raised from 0.10 to filter out junk chunks
 
 # ─── Security & Rate Limiting ────────────────────────────────────────────────
 ENABLE_RATE_LIMITING = True
