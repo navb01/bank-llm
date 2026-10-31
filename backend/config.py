@@ -25,11 +25,11 @@ EMBED_MODEL = "nomic-embed-text" # Local embedding model via Ollama
 CHROMA_COLLECTION_INTERNAL = "bank_circulars"    # Internal bank circulars
 CHROMA_COLLECTION_EXTERNAL = "regulatory_docs"   # RBI / NABARD / SEBI docs
 
-# ─── RAG Settings (OPTIMIZED FOR SPEED) ──────────────────────────────────────
-CHUNK_SIZE = 800            
-CHUNK_OVERLAP = 150
-TOP_K_RESULTS = 3           # Reduced from 8 to 3
-MIN_SIMILARITY_SCORE = 0.55 # Raised from 0.10 to filter out junk chunks
+# ─── RAG Settings (Optimized for Low Latency) ─────────────────────────────────
+CHUNK_SIZE = 800            # Characters per chunk
+CHUNK_OVERLAP = 150         # Overlap between chunks (prevents splitting key info)
+TOP_K_RESULTS = 3           # Top 3 chunks keeps LLM prompt evaluation fast on CPU
+MIN_SIMILARITY_SCORE = 0.55 # Filters out irrelevant chunks so LLM reads less noise
 
 # ─── Security & Rate Limiting ────────────────────────────────────────────────
 ENABLE_RATE_LIMITING = True
@@ -52,7 +52,6 @@ CACHE_TTL_SECONDS = 300  # Cache query results for 5 minutes
 MAX_WORKERS = 4  # Thread pool size for parallel tasks
 
 # ─── Web Scraping (Secondary Learning) ────────────────────────────────────────
-# Configure RBI, NABARD, SEBI sources for web scraping
 SCRAPE_SOURCES = [
     {
         "name": "RBI - Notifications & Circulars",
@@ -111,27 +110,9 @@ SERVER_PORT = 8000
 CORS_ORIGINS = ["*"]  # Allow all origins on LAN
 
 # ─── Database Configuration ──────────────────────────────────────────────────
-# PostgreSQL Connection String
-# Format: postgresql://username:password@host:port/database
-# 
-# Options:
-# 1. LOCAL PostgreSQL (recommended for production):
-#    DATABASE_URL = "postgresql://postgres:password@localhost:5432/bank_llm"
-#
-# 2. REMOTE PostgreSQL (cloud):
-#    DATABASE_URL = "postgresql://user:pass@cloud-host.com:5432/bank_llm"
-#
-# 3. SQLite (development/testing - no setup required):
-#    DATABASE_URL = "sqlite:///" + str(BASE_DIR / "bank_llm.db")
-
-# Default: SQLite for zero-setup testing
-# To use PostgreSQL, install it and set:
-# DATABASE_URL = "postgresql://postgres:your_password@localhost:5432/bank_llm"
-
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     f"sqlite:///{BASE_DIR / 'bank_llm.db'}"  # Local SQLite by default
 )
 
-# Enable database query logging for debugging (set to True to see SQL queries)
 DB_ECHO = os.getenv("DB_ECHO", "False").lower() == "true"
