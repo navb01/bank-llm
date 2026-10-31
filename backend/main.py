@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Optional, Dict
 from datetime import datetime
 from threading import Lock
-from functools import wraps
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks, Request
@@ -29,9 +28,10 @@ from config import (
 )
 from document_processor import (
     ingest_document, get_ingestion_stats,
-    list_ingested_files, get_collection, get_chroma_client, is_file_already_ingested
+    list_ingested_files, get_collection, get_chroma_client, is_file_already_ingested,
+    get_embeddings
 )
-from rag_engine import ask
+from rag_engine import ask, get_llm
 from web_scraper import run_web_scraping
 from learning import learning_manager
 from adaptive_learning import adaptive_manager
@@ -235,8 +235,9 @@ async def chat(request: ChatRequest, req: Request):
             cached = True
             logger.info(f"Serving cached answer with {len(sources)} sources")
         else:
-            # Run full RAG pipeline
-            result = ask(query)
+            # Run full RAG pipeline in thread pool executor so FastAPI event loop is not blocked
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, ask, query)
             answer = result["answer"]
             sources = result["sources"]
             chunks_found = result["chunks_found"]
@@ -315,9 +316,10 @@ async def upload_document(
     with ingestion_lock:
         ingestion_in_progress = True
     
-    # Ingest synchronously so the user knows if it worked
+    # Ingest synchronously in thread pool so the user knows if it worked
     try:
-        result = ingest_document(save_path)
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, ingest_document, save_path)
         if result.get("status") == "error":
             logger.warning(f"Ingestion failed for {file.filename}: {result.get('message')}")
             return {
@@ -416,7 +418,6 @@ async def reingest_all(background_tasks: BackgroundTasks):
 async def _ingest_all(files: list[Path]):
     """Run blocking ingestion in a thread pool to avoid blocking the event loop."""
     global ingestion_in_progress
-    import concurrent.futures
 
     loop = asyncio.get_event_loop()
     results = []
@@ -467,7 +468,8 @@ async def _run_scraping_task():
     scraping_in_progress = True
     try:
         logger.info("Starting web scraping task...")
-        result = run_web_scraping(test_mode=False)
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, run_web_scraping, False)
         last_scrape_result = result
         logger.info(f"Web scraping completed: {result['successful_sources']} sources succeeded")
     except Exception as e:
@@ -783,6 +785,15 @@ async def startup_event():
         logger.info("  ✓ Database initialized")
     except Exception as e:
         logger.error(f"  ✗ Database initialization failed: {e}")
+
+    # Pre-warm singletons (ChromaDB client, Embedder, LLM)
+    try:
+        get_chroma_client()
+        get_embeddings()
+        get_llm()
+        logger.info("  ✓ ChromaDB and Ollama singletons initialized")
+    except Exception as e:
+        logger.warning(f"  ! Pre-warming warning: {e}")
 
     # Log vector DB stats
     stats = get_ingestion_stats()
